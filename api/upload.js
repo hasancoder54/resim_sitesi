@@ -35,6 +35,7 @@ function parseMultipart(req) {
             if (fileBase64) {
                 resolve({ fileBase64, fileName });
             } else {
+                // Dosya seçilmediyse veya boşsa
                 reject(new Error("Görsel dosyası bulunamadı veya boş."));
             }
         });
@@ -47,7 +48,6 @@ function parseMultipart(req) {
 
 
 module.exports = async (req, res) => {
-    // Sadece POST isteklerini kabul et
     if (req.method !== 'POST') {
         res.status(405).send('Yalnızca POST metoduna izin verilir.');
         return;
@@ -70,7 +70,6 @@ module.exports = async (req, res) => {
         const veri = response.data;
         
         if (veri.success && "data" in veri) {
-            // Başarılı yanıt: link ve delete_hash'i döndür
             res.status(200).json({
                 success: true,
                 link: veri.data.url,
@@ -78,7 +77,6 @@ module.exports = async (req, res) => {
                 fileName: fileName
             });
         } else {
-            // API'den gelen hata
             res.status(400).json({
                 success: false,
                 message: veri.error.message || "Bilinmeyen ImgBB Hatası"
