@@ -1,0 +1,13 @@
+{
+  "name": "imgbb-vercel-uploader",
+  "version": "1.0.0",
+  "description": "Vercel üzerinde ImgBB görsel yükleyici",
+  "main": "index.html",
+  "scripts": {
+    "start": "echo 'Vercel ortamında çalışır'"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "busboy": "^1.6.0"
+  }
+}

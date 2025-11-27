@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ImgBB Yükleyici (Vercel + Firestore)</title>
+    
+    <link rel="stylesheet" href="/style.css">
+    
+    <!-- Firebase SDK Yüklemeleri -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, addDoc, onSnapshot, collection, deleteDoc, setDoc, serverTimestamp, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+
+        // Firebase log seviyesini ayarla (hata ayıklama için)
+        setLogLevel('debug');
+        
+        // --- Global Değişkenler ve Konfigürasyon ---
+        
+        // Firebase global değişkenlerini al
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // Uygulama ayarları
+        const CORRECT_PASSWORD = 'Admin51423';
+        const FIRESTORE_COLLECTION_NAME = 'imgbb_uploads';
+        
+        // --- DOM Elementleri ---
+        const loginSection = document.getElementById('login-section');
+        const uploadSection = document.getElementById('upload-section');
+        const historySection = document.getElementById('history-section');
+        const loginMessage = document.getElementById('login-message');
+        const passwordInput = document.getElementById('password-input');
+        const loginButton = document.getElementById('login-button');
+        const uploadForm = document.getElementById('upload-form');
+        const uploadMessage = document.getElementById('upload-message');
+        const imageGrid = document.getElementById('image-grid');
+
+        function setDisplay(element, isVisible) {
+            element.classList.toggle('hidden', !isVisible);
+        }
+
+        function updateMessage(type, content) {
+            uploadMessage.className = `message ${type}`;
+            uploadMessage.textContent = content;
+            setDisplay(uploadMessage, true);
+        }
+
+        // --- 1. FIREBASE BAŞLATMA VE YETKİLENDİRME ---
+
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Özel Auth Token ile giriş yap veya anonim giriş yap
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Auth durumu değiştiğinde (giriş yapıldığında)
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Firebase Auth Başarılı. User ID:", userId);
+                        // Eğer şifre ile giriş yapılmışsa verileri yükle
+                        if (localStorage.getItem('isAuthenticated') === 'true') {
+                            loadHistoryListener();
+                            // Siteye girdikten sonra şifre alanını gizle
+                            setDisplay(loginSection, false);
+                            setDisplay(uploadSection, true);
+                            setDisplay(historySection, true);
+                        }
+                    } else {
+                        userId = null;
+                        isAuthReady = false;
+                        // Şifre ile giriş yapılmadan önce anonim kullanıcı ID'si al
+                        // Bu projede, şifre girişi yapılmadan Firestore verisine erişime izin verilmemeli.
+                        console.log("Firebase Auth Hazır Değil.");
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Başlatma Hatası:", error);
+                updateMessage('error', 'Veritabanı bağlantısı kurulamadı.');
+            }
+        }
+        
+        // --- 2. GİRİŞ KONTROLÜ ---
+        
+        function checkPassword() {
+            const enteredPassword = passwordInput.value;
+            if (enteredPassword === CORRECT_PASSWORD) {
+                // Başarılı giriş
+                localStorage.setItem('isAuthenticated', 'true');
+                setDisplay(loginMessage, false);
+                passwordInput.value = '';
+                // Auth zaten hazırsa doğrudan göster, değilse AuthListener gösterecek
+                if (isAuthReady) {
+                    setDisplay(loginSection, false);
+                    setDisplay(uploadSection, true);
+                    setDisplay(historySection, true);
+                    loadHistoryListener();
+                }
+            } else {
+                // Başarısız giriş
+                setDisplay(loginMessage, true);
+                loginMessage.textContent = 'Yanlış şifre. Tekrar deneyin.';
+                passwordInput.value = '';
+            }
+        }
+
+        // Giriş Butonu Olayı
+        loginButton.addEventListener('click', checkPassword);
+        passwordInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                checkPassword();
+            }
+        });
+        
+        // Sayfa Yüklenince Şifre Durumunu Kontrol Et
+        if (localStorage.getItem('isAuthenticated') === 'true') {
+            // Şifre doğruysa, Firebase hazır olana kadar bekle
+            setDisplay(loginSection, false);
+        } else {
+            setDisplay(loginSection, true);
+        }
+
+        // --- 3. FIRESTORE İŞLEMLERİ (OKUMA VE GÖRÜNTÜLEME) ---
+        
+        function getCollectionRef() {
+            // Görselleri herkese açık bir alana kaydediyoruz ki, uygulamaya giren her kullanıcı (yani şifreyi bilen herkes) görebilsin.
+            // Yolu: /artifacts/{appId}/public/data/imgbb_uploads
+            return collection(db, `artifacts/${appId}/public/data/${FIRESTORE_COLLECTION_NAME}`);
+        }
+        
+        function renderImages(images) {
+            imageGrid.innerHTML = ''; // Önceki listeyi temizle
+            
+            if (images.length === 0) {
+                imageGrid.innerHTML = '<p style="grid-column: 1 / -1; text-align: center;">Henüz yüklenmiş görsel yok.</p>';
+                return;
+            }
+
+            images.forEach(img => {
+                const item = document.createElement('div');
+                item.className = 'image-item';
+                item.dataset.id = img.id;
+                
+                item.innerHTML = `
+                    <img src="${img.link}" alt="${img.dosya_adi}" loading="lazy" class="uploaded-image">
+                    <div class="image-info">
+                        <p>🔗 <a href="${img.link}" target="_blank" class="link-text">Link Kopyala</a></p>
+                        <p class="filename">${img.dosya_adi} (Boyut: ${Math.round(img.boyut / 1024)} KB)</p>
+                        <p class="date">${new Date(img.tarih.seconds * 1000).toLocaleString()}</p>
+                    </div>
+                    <button class="delete-button" data-id="${img.id}">Sil</button>
+                `;
+                imageGrid.appendChild(item);
+            });
+        }
+        
+        function loadHistoryListener() {
+            if (!isAuthReady) return;
+            
+            // Tarihe göre ters sırada (en yeni en üstte) listeleme
+            const imagesQuery = query(getCollectionRef());
+
+            onSnapshot(imagesQuery, (snapshot) => {
+                const images = [];
+                snapshot.forEach(doc => {
+                    images.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // Firestore'da orderBy'den kaçındığımız için burada tarihe göre sıralama yapalım.
+                // Tarihi "seconds" alanına göre sıralayalım (en yeni başa)
+                images.sort((a, b) => (b.tarih?.seconds || 0) - (a.tarih?.seconds || 0));
+
+                renderImages(images);
+                document.getElementById('history-title').textContent = `Yüklenen Görseller (${images.length})`;
+            }, (error) => {
+                console.error("Firestore Dinleme Hatası:", error);
+                updateMessage('error', 'Görsel geçmişi yüklenemedi.');
+            });
+        }
+
+        // --- 4. GÖRSEL YÜKLEME VE KAYDETME İŞLEMLERİ ---
+        
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            if (!isAuthReady || localStorage.getItem('isAuthenticated') !== 'true') {
+                updateMessage('error', 'Lütfen önce şifre ile giriş yapın.');
+                return;
+            }
+
+            const fileInput = uploadForm.querySelector('input[type="file"]');
+            if (fileInput.files.length === 0) {
+                updateMessage('error', 'Lütfen bir görsel seçin.');
+                return;
+            }
+
+            updateMessage('info', '⏳ Görsel yükleniyor...');
+            
+            const file = fileInput.files[0];
+            const formData = new FormData(uploadForm);
+            
+            try {
+                // 1. ImgBB'ye Yükleme (Node.js Serverless Function Üzerinden)
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    // 2. ImgBB Başarılı -> Firestore'a Kaydet
+                    await addDoc(getCollectionRef(), {
+                        link: data.link,
+                        delete_hash: data.delete_hash,
+                        dosya_adi: data.fileName,
+                        boyut: file.size,
+                        yukleyen_id: userId,
+                        tarih: serverTimestamp() // Sunucu saati ile kaydetme
+                    });
+                    
+                    updateMessage('success', `Başarılı! Direkt Link: ${data.link}`);
+                    fileInput.value = ''; // Formu temizle
+                    
+                } else {
+                    // ImgBB API Hatası
+                    updateMessage('error', `Yükleme Başarısız! Hata: ${data.message}`);
+                }
+            } catch (error) {
+                // Ağ veya Sunucu Hatası
+                updateMessage('error', `Yükleme sırasında kritik hata: ${error.message}`);
+                console.error('Yükleme Hatası:', error);
+            }
+        });
+        
+        // --- 5. SİLME İŞLEMİ ---
+        
+        imageGrid.addEventListener('click', async (e) => {
+            if (e.target.classList.contains('delete-button')) {
+                const docId = e.target.dataset.id;
+                
+                if (!isAuthReady || !docId) return;
+
+                if (!confirm('Bu görseli kalıcı olarak silmek istediğinizden emin misiniz?')) {
+                    return;
+                }
+
+                try {
+                    // ImgBB silme hash'i yerine Firestore doküman ID'sini kullanıyoruz
+                    const docRef = doc(getCollectionRef(), docId);
+                    await deleteDoc(docRef);
+                    
+                    // Not: Görsel ImgBB'de kalmaya devam eder, ancak bizim geçmişimizden silinir.
+                    updateMessage('info', 'Görsel geçmişten başarıyla kaldırıldı.');
+                } catch (error) {
+                    console.error('Silme Hatası:', error);
+                    updateMessage('error', 'Silme işlemi sırasında hata oluştu.');
+                }
+            }
+            
+            // Link Kopyalama
+            if (e.target.classList.contains('link-text')) {
+                e.preventDefault();
+                const url = e.target.href;
+                const tempInput = document.createElement('input');
+                tempInput.value = url;
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                document.execCommand('copy');
+                document.body.removeChild(tempInput);
+                alert('Link panoya kopyalandı: ' + url);
+            }
+        });
+        
+        // --- UYGULAMAYI BAŞLAT ---
+        initializeFirebase();
+
+    </script>
+</body>
+</html>
+
