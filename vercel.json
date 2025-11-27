@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/*.js",
+      "src": "api/upload.js",
       "use": "@vercel/node"
     }
   ],
